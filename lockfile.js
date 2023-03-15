@@ -1,5 +1,5 @@
 import fs from 'fs';
-import { sleep } from './lockutils.js';
+import { exists, stat, sleep } from './lockutils.js';
 /**
  * lock filepath
  * @param dirPath
@@ -98,3 +98,4 @@ async function rmdirRetry(path, retryCount) {
     }
     return true;
 }
+export { sleep, exists, stat };

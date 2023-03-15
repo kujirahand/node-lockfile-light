@@ -100,3 +100,5 @@ async function rmdirRetry(path: string, retryCount: number): Promise<boolean> {
   }
   return true;
 }
+
+export { sleep, exists, stat };
