@@ -58,3 +58,36 @@ const lockDir = './.__lock_for_something__';
     })
 })();
 ```
+
+## Serial execution example
+
+```js:serial_example.js
+// Serial execution example
+import { lock, sleep } from 'lockfile-light';
+
+const lockDir = './.__lock_for_something__';
+
+(async () => {
+    const opt = { waitTimeMS: 100, retryCount: 50, deadlockTimeMS: 10000, name: '?' };
+    const opt1 = { ...opt, name: 'task1' };
+    const taskName1 = await lock(lockDir, opt1, async () => {
+        console.log('something1:start');
+        await sleep(1000);
+    })
+    console.log('done=', taskName1);
+
+    const opt2 = { ...opt, name: 'task2' };
+    const taskName2 = await lock(lockDir, opt2, async () => {
+        console.log('something2:start');
+        await sleep(1000);
+    })
+    console.log('done=', taskName2);
+
+    const opt3 = { ...opt, name: 'task3' };
+    const taskName3 = await lock(lockDir, opt3, async () => {
+        console.log('something3:start');
+        await sleep(1000);
+    })
+    console.log('done=', taskName3);
+})();
+```
