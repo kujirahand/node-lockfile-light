@@ -1,2 +1,6 @@
 # node-lockfile-light
-lockfile for node.js
+
+This is a module that provides simple file locking function for Node.js.
+
+```
+```
