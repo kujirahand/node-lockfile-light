@@ -24,18 +24,28 @@ export async function lock(dirPath, options, callback) {
     // console.log('@options=', options);
     // task
     const executeTask = async () => {
+        let errMsg = '';
         try {
             fs.mkdirSync(dirPath, { recursive: true, mode: 0o777 });
         }
         catch (err) {
             throw new Error('Could not get lock :' + err.message);
         }
-        await callback();
+        try {
+            await callback();
+        }
+        catch (err) {
+            errMsg = `Task error: ${err.message}`;
+        }
         try {
             fs.rmdirSync(dirPath);
         }
         catch (err) {
             // unknown reason unlock
+        }
+        // throw callback error
+        if (errMsg !== '') {
+            throw new Error(errMsg);
         }
         return (options.name) ? options.name : '';
     };

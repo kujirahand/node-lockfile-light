@@ -80,4 +80,19 @@ describe('lock_test', () => {
         await Promise.all([task1, task2, task3]);
         assert.strictEqual(task.join('-'), '1-2-3');
     });
+    it('check error', async () => {
+        let v = 0;
+        try {
+            await lock(lockfile, {}, async () => {
+                await sleep(1);
+                v = 1;
+                throw new Error('test');
+                v = 2;
+            });
+        }
+        catch (err) {
+            //
+        }
+        assert.strictEqual(v, 1);
+    });
 });

@@ -1,6 +1,6 @@
 {
   "name": "lockfile-light",
-  "version": "1.0.3",
+  "version": "1.0.4",
   "description": "This is simple module that provide locking file function.",
   "type": "module",
   "main": "lockfile.js",
