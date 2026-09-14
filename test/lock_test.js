@@ -1,99 +1,160 @@
-import assert from 'assert';
-import { describe, it } from 'node:test';
-import path from 'path';
-import { fileURLToPath } from 'url';
-import { sleep } from '../lockutils.js';
-import { lock } from '../lockfile.js';
-const __filename = fileURLToPath(import.meta.url);
-const __dirname = path.dirname(__filename);
-describe('lock_test', () => {
-    const lockfile = path.join(__dirname, '__lock__1234__');
-    const lockfile2 = path.join(__dirname, '__lock2__1234__');
-    it('simple', async () => {
-        let v = 0;
-        await lock(lockfile, {}, async () => {
-            await sleep(1);
-            v = 1;
-        });
-        assert.strictEqual(v, 1);
+import assert from 'node:assert';
+import { spawn } from 'node:child_process';
+import fs from 'node:fs';
+import os from 'node:os';
+import path from 'node:path';
+import { afterEach, beforeEach, describe, it } from 'node:test';
+import { lock, sleep } from '../lockfile.js';
+describe('lock', () => {
+    const testRoot = path.join(os.tmpdir(), `lockfile-light-test-${process.pid}`);
+    const lockDir = path.join(testRoot, 'shared.lock');
+    beforeEach(() => {
+        fs.rmSync(testRoot, { recursive: true, force: true });
+        fs.mkdirSync(testRoot, { recursive: true });
     });
-    it('lock 3times', async () => {
-        let task = '';
-        await lock(lockfile, {}, async () => {
-            task += '1';
-            await sleep(100);
-        });
-        await lock(lockfile, {}, async () => {
-            task += '2';
-            await sleep(100);
-        });
-        await lock(lockfile, {}, async () => {
-            task += '3';
-            await sleep(100);
-        });
-        assert.strictEqual(task, '123');
+    afterEach(() => {
+        fs.rmSync(testRoot, { recursive: true, force: true });
     });
-    it('lock promise.all', async () => {
-        const task = [];
-        const task3 = async () => {
-            await lock(lockfile2, { name: 'task3', waitTimeMS: 50 }, async () => {
-                await sleep(300);
-                task.push(3);
-            });
-        };
-        const task2 = async () => {
-            await lock(lockfile2, { name: 'task2', waitTimeMS: 50 }, async () => {
-                await sleep(100);
-                task.push(2);
-            });
-        };
-        const task1 = async () => {
-            await lock(lockfile2, { name: 'task1', waitTimeMS: 50 }, async () => {
-                await sleep(1);
-                task.push(1);
-            });
-        };
-        await Promise.all([task3(), task2(), task1()]);
-        task.push(4);
-        task.sort();
-        assert.strictEqual(task.join('-'), '1-2-3-4');
+    it('executes a callback and returns its name', async () => {
+        let called = false;
+        const name = await lock(lockDir, { name: 'task1' }, async () => {
+            called = true;
+        });
+        assert.strictEqual(called, true);
+        assert.strictEqual(name, 'task1');
+        assert.strictEqual(fs.existsSync(lockDir), false);
     });
-    it('lock options', async () => {
-        const options = {
-            waitTimeMS: 50,
-            retryCount: 30,
-            deadlockTimeMS: 5000,
-            name: '?',
-        };
-        const task = [];
-        const makeLock = async (n) => {
-            const val = n;
-            const opt = { ...options };
-            opt.name = 'task' + val;
-            await lock(lockfile, opt, async () => {
-                await sleep(val * 100);
-                task.push(val);
+    it('allows only one concurrent callback in a process', async () => {
+        let active = 0;
+        let maxActive = 0;
+        const run = async () => {
+            await lock(lockDir, { waitTimeMS: 2, retryCount: 500 }, async () => {
+                active++;
+                maxActive = Math.max(maxActive, active);
+                await sleep(20);
+                active--;
             });
         };
-        const task1 = makeLock(1);
-        const task2 = makeLock(2);
-        const task3 = makeLock(3);
-        await Promise.all([task1, task2, task3]);
-        assert.strictEqual(task.join('-'), '1-2-3');
+        await Promise.all(Array.from({ length: 10 }, run));
+        assert.strictEqual(maxActive, 1);
     });
-    it('check error', async () => {
-        let v = 0;
-        try {
-            await lock(lockfile, {}, async () => {
-                await sleep(1);
-                v = 1;
-                throw new Error('test');
-                v = 2;
-            });
+    it('allows only one concurrent callback across processes', async () => {
+        const eventFile = path.join(testRoot, 'events.log');
+        const moduleUrl = new URL('../lockfile.js', import.meta.url).href;
+        const startTime = Date.now() + 500;
+        const childCode = [
+            `import fs from 'node:fs';`,
+            `import { lock, sleep } from ${JSON.stringify(moduleUrl)};`,
+            `const [start, lockDir, eventFile, id] = process.argv.slice(1);`,
+            `while (Date.now() < Number(start)) {}`,
+            `await lock(lockDir, { waitTimeMS: 2, retryCount: 1000 }, async () => {`,
+            `  fs.appendFileSync(eventFile, 'S ' + id + '\\n');`,
+            `  await sleep(20);`,
+            `  fs.appendFileSync(eventFile, 'E ' + id + '\\n');`,
+            `});`,
+        ].join('\n');
+        await Promise.all(Array.from({ length: 12 }, (_, index) => runChild([
+            '--input-type=module',
+            '--eval',
+            childCode,
+            String(startTime),
+            lockDir,
+            eventFile,
+            String(index),
+        ])));
+        let active = 0;
+        let maxActive = 0;
+        for (const line of fs.readFileSync(eventFile, 'utf8').trim().split('\n')) {
+            active += line.startsWith('S ') ? 1 : -1;
+            maxActive = Math.max(maxActive, active);
+            assert.ok(active >= 0);
         }
-        catch (err) {
-            //
-        }
-        assert.strictEqual(v, 1);
+        assert.strictEqual(active, 0);
+        assert.strictEqual(maxActive, 1);
+    });
+    it('does not steal a live lock after deadlockTimeMS', async () => {
+        let active = 0;
+        let maxActive = 0;
+        const run = async (delay, duration) => {
+            await sleep(delay);
+            await lock(lockDir, { waitTimeMS: 2, retryCount: 200, deadlockTimeMS: 10 }, async () => {
+                active++;
+                maxActive = Math.max(maxActive, active);
+                await sleep(duration);
+                active--;
+            });
+        };
+        await Promise.all([run(0, 80), run(30, 10), run(50, 10)]);
+        assert.strictEqual(maxActive, 1);
+    });
+    it('recovers a stale empty lock left by an older version', async () => {
+        fs.mkdirSync(lockDir);
+        await sleep(15);
+        let called = false;
+        await lock(lockDir, { waitTimeMS: 2, retryCount: 10, deadlockTimeMS: 10 }, async () => {
+            called = true;
+        });
+        assert.strictEqual(called, true);
+        assert.strictEqual(fs.existsSync(lockDir), false);
+    });
+    it('recovers a stale lock left by a terminated owner', async () => {
+        fs.mkdirSync(lockDir);
+        fs.writeFileSync(path.join(lockDir, '.lockfile-light-owner'), JSON.stringify({
+            version: 1,
+            token: 'terminated-owner',
+            pid: 2147483647,
+            hostname: os.hostname(),
+        }));
+        await sleep(15);
+        let called = false;
+        await lock(lockDir, { waitTimeMS: 2, retryCount: 10, deadlockTimeMS: 10 }, async () => {
+            called = true;
+        });
+        assert.strictEqual(called, true);
+        assert.strictEqual(fs.existsSync(lockDir), false);
+    });
+    it('never deletes unknown files from a stale directory', async () => {
+        fs.mkdirSync(lockDir);
+        const sentinel = path.join(lockDir, 'important.txt');
+        fs.writeFileSync(sentinel, 'keep');
+        await sleep(15);
+        await assert.rejects(lock(lockDir, { waitTimeMS: 2, retryCount: 1, deadlockTimeMS: 10 }, async () => { }), /Refusing to remove non-empty lock directory/);
+        assert.strictEqual(fs.readFileSync(sentinel, 'utf8'), 'keep');
+    });
+    it('reports an unlock failure and preserves unexpected contents', async () => {
+        const sentinel = path.join(lockDir, 'unexpected.txt');
+        await assert.rejects(lock(lockDir, {}, async () => {
+            fs.writeFileSync(sentinel, 'keep');
+        }), /Could not release lock/);
+        assert.strictEqual(fs.readFileSync(sentinel, 'utf8'), 'keep');
+    });
+    it('rethrows the original callback error after unlocking', async () => {
+        const expected = new TypeError('callback failed');
+        await assert.rejects(lock(lockDir, {}, async () => {
+            throw expected;
+        }), (err) => err === expected);
+        assert.strictEqual(fs.existsSync(lockDir), false);
+    });
+    it('rejects unsafe option values', async () => {
+        await assert.rejects(lock(lockDir, { deadlockTimeMS: -1 }, async () => { }), RangeError);
+        await assert.rejects(lock(lockDir, { waitTimeMS: 0 }, async () => { }), RangeError);
+        await assert.rejects(lock(lockDir, { retryCount: 1.5 }, async () => { }), RangeError);
     });
 });
+function runChild(args) {
+    return new Promise((resolve, reject) => {
+        const child = spawn(process.execPath, args, { stdio: ['ignore', 'ignore', 'pipe'] });
+        let stderr = '';
+        child.stderr.setEncoding('utf8');
+        child.stderr.on('data', (chunk) => { stderr += chunk; });
+        child.on('error', reject);
+        child.on('exit', (code, signal) => {
+            if (code === 0) {
+                resolve();
+            }
+            else {
+                reject(new Error(`Child failed with code=${code} signal=${signal}: ${stderr}`));
+            }
+        });
+    });
+}
